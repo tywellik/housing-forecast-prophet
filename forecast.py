@@ -5,9 +5,19 @@ from prophet import Prophet
 from prophet.plot import add_changepoints_to_plot
 import math
 import datetime
+import time
+import urllib.request
+from io import StringIO
+
+# https://facebook.github.io/prophet/docs/seasonality,_holiday_effects,_and_regressors.html
 
 # read zillow housing data
-housing_data = pd.read_csv('input_data/zillow_monthly_metro_housing_prices.csv')
+epoch_time = str(time.time())
+url = "https://files.zillowstatic.com/research/public_csvs/zhvi/Metro_zhvi_uc_sfrcondo_tier_0.33_0.67_month.csv?t=" + epoch_time
+with urllib.request.urlopen(url) as f:
+    html = f.read().decode('utf-8')
+
+housing_data = pd.read_csv(StringIO(html), sep=",")
 
 # filter for Austin, TX data
 austin_data = housing_data[housing_data['RegionName'] == 'Austin, TX']

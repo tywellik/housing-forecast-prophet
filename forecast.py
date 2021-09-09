@@ -1,8 +1,11 @@
+from numpy.core.numeric import cross
 import pandas as pd
 import numpy as np
-from fbprophet import Prophet
+import itertools
+from pandas.core.reshape.tile import cut
 from prophet import Prophet
-from prophet.plot import add_changepoints_to_plot
+from prophet.plot import add_changepoints_to_plot, plot_cross_validation_metric
+from prophet.diagnostics import cross_validation, performance_metrics
 import math
 import datetime
 import time
@@ -78,32 +81,73 @@ austin_data = austin_data.T # transpose df
 austin_data = austin_data.reset_index().rename(columns = {'index': 'ds', 0: 'y'})
 austin_data['ds'] = pd.to_datetime(austin_data['ds'])
 print(austin_data.head())  
-# TODO: determine holidays? 2008? Covid?
-# need df with columns holiday, Month, lower_window, upper_window (not sure what these last two mean)
 
 # override trend changepoint identification with cusum-based method
-# TODO: determine how to implement this into the model
-# input_time_series_df['mov_avg_y'] = input_time_series_df['y'].rolling(window).mean() # TODO: add this if I want to smooth the data?
 output_df = pd.DataFrame(columns = ['Day', 'Confidence Level'])
 output_df = bootstrap_data(austin_data, 'y', 'ds', bootstrap_samples, output_df, max_trend_length, 0)
-print(output_df)   
-# exit()
+changepoints_list = output_df['Day'].sort_values().tolist()
+print(changepoints_list)
+
+# hyperparameter tuning
+# changepoint_prior_scale: flexibility of trend and how much the trend changes at the changepoints - larger = potential to overfit
+# seasonality_prior_scale: flexibility of seasonality - smaller means there is a very small seasonal effect
+# seasonality_mode: whether seasonality is additive or multiplicative
+param_grid = {
+    'changepoints': [changepoints_list],
+    'changepoint_prior_scale': [0.001, 0.01, 0.1, 0.5],
+    'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],
+    'seasonality_mode': ['additive', 'multiplicative'],
+}
+# generate combinations of parameters
+all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
+rmses = [] # store RMSEs for each param combo here
+cutoffs = pd.date_range(start='2002-01-01', end='2019-01-01', freq='12MS') # cutoffs for cv
+# use cross validation to evaluate each combination of parameters
+for params in all_params:
+    m = Prophet(**params)
+    m.add_seasonality(name = 'yearly', period = 365, fourier_order = 12,)
+    m.fit(austin_data)
+    df_cv = cross_validation(m, horizon = '730 days', cutoffs = cutoffs)
+    df_p = performance_metrics(df_cv)
+    rmses.append(df_p['rmse'].values[0])
+# find the best parameters
+tuning_results = pd.DataFrame(all_params)
+tuning_results['rmse'] = rmses
+tuning_results.drop(columns=['changepoints'], inplace = True)
+tuning_results.to_csv('output/tuning_results.csv', index = False)
+best_params = all_params[np.argmin(rmses)]
+print('BEST PARAMETERS:', best_params)
+
 # Generate Prophet model
-    # m = Prophet(holidays = holiday_df, seasonality_mode = 'multiplicative')
-m = Prophet(changepoint_range = 1.0,  # use all of the data 
-            changepoint_prior_scale = 0.05, # decrease flexibility of the model to reduce overfitting (default is 0.05)
-            seasonality_mode = 'multiplicative')
+# m = Prophet(changepoints = changepoints_list, # override changepoint locations
+#             changepoint_prior_scale = 0.03,
+#             seasonality_mode = 'multiplicative')
+m = Prophet(**best_params)
 m.add_seasonality(name = 'yearly', period = 365, fourier_order = 12,)
 m.fit(austin_data)
 
 # Forecast
-future = m.make_future_dataframe(periods = 24, freq = 'M')
+future = m.make_future_dataframe(periods = 24, freq = 'MS')
 forecast = m.predict(future)
+
+# Cross Validation
+# this cuts the data off every year (1/2 the horizon) starting 6 years in (3 times the horizon) 
+# and trains the model each time with the cutoff data
+cutoffs = pd.date_range(start='2002-01-01', end='2019-01-01', freq='12MS')
+df_cv = cross_validation(m, horizon = '730 days', cutoffs = cutoffs)
+# get useful stats about the prediction performance -> MSE, RMSE, MAE, MAPE, etc.
+df_p = performance_metrics(df_cv)
+df_cv.to_csv('output/df_cv.csv', index = False)
+df_p.to_csv('output/df_p.csv', index = False)
+# visualize CV performance metrics - dots show the abs % error for each prediction in df_cv and the blue line shows the MAPE
+# where the mean is taken over a rolling window of the dots
+fig_cv = plot_cross_validation_metric(df_cv, metric = 'mape')
+fig_cv.savefig('figures/forecast_cv_mape.png', index = False)
 
 # Plots
 pd.plotting.register_matplotlib_converters()
 fig1 = m.plot(forecast)
-a = add_changepoints_to_plot(fig1.gca(), m, forecast)
+# a = add_changepoints_to_plot(fig1.gca(), m, forecast)
 fig1.savefig('figures/forecast.png', index = False)
 fig2 = m.plot_components(forecast)
 fig2.savefig('figures/forecast_components.png', index = False)
